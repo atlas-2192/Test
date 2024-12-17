@@ -1,5 +1,10 @@
 import DLMM, { StrategyType } from "@meteora-ag/dlmm";
-import { clusterApiUrl, Connection, PublicKey } from "@solana/web3.js";
+import {
+  clusterApiUrl,
+  Connection,
+  PublicKey,
+  sendAndConfirmTransaction,
+} from "@solana/web3.js";
 import { BN } from "bn.js";
 
 const connection = new Connection(
@@ -16,9 +21,36 @@ export async function createLiquidityPosition(
   solAmount: number,
   priceRange: { lower: number; upper: number }
 ) {
+  // Input validation
+  if (solAmount <= 0) {
+    throw new Error("Invalid solAmount. It must be greater than 0.");
+  }
+
+  if (priceRange.lower <= 0 || priceRange.upper <= 0) {
+    throw new Error(
+      "Invalid price range. Both lower and upper prices must be greater than 0."
+    );
+  }
+
+  if (priceRange.lower >= priceRange.upper) {
+    throw new Error(
+      "Invalid price range. The lower price must be less than the upper price."
+    );
+  }
+
   try {
     console.log("Creating liquidity position...");
     const dlmmPool = await DLMM.create(connection, SOL_USDC_POOL);
+
+    // Validate user has sufficient SOL balance
+    const balance = await connection.getBalance(new PublicKey(tokenMint));
+    const requiredBalance = solAmount * 1e9;
+
+    if (balance < requiredBalance) {
+      throw new Error(
+        `Insufficient SOL balance. Required: ${requiredBalance}, Available: ${balance}`
+      );
+    }
 
     const activeBin = await dlmmPool.getActiveBin();
     const activeBinPricePerToken = dlmmPool.fromPricePerLamport(
@@ -29,29 +61,107 @@ export async function createLiquidityPosition(
     const minBinId = dlmmPool.getBinIdFromPrice(priceRange.lower, true);
     const maxBinId = dlmmPool.getBinIdFromPrice(priceRange.upper, true);
 
-    // Convert SOL amount to lamports
-    const totalXAmount = new BN(solAmount * 1e9);
+    // Setup position amounts
+    const totalXAmount = new BN(requiredBalance);
     const totalYAmount = totalXAmount.mul(new BN(activeBinPricePerToken));
 
-    // Generate a new PublicKey for the position
+    // Generate unique position ID
     const positionPubKey = PublicKey.unique();
 
-    // Create liquidity position (Spot Balance deposit)
-    const createPositionTx =
-      await dlmmPool.initializePositionAndAddLiquidityByStrategy({
-        totalXAmount,
-        totalYAmount,
-        strategy: {
-          maxBinId,
-          minBinId,
-          strategyType: StrategyType.BidAskOneSide,
-        },
-        user: new PublicKey(tokenMint),
-        positionPubKey,
-      });
+    // Initialize position with one-sided strategy
+    await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+      totalXAmount,
+      totalYAmount,
+      strategy: {
+        maxBinId,
+        minBinId,
+        strategyType: StrategyType.BidAskOneSide,
+      },
+      user: new PublicKey(tokenMint),
+      positionPubKey,
+    });
 
-    return createPositionTx;
+    return positionPubKey;
   } catch (error) {
     console.log(error);
+  }
+}
+
+export async function withdrawPosition(positionId: string, amount?: number) {
+  try {
+    console.log(`Withdrawing position ID: ${positionId}`);
+
+    const dlmmPool = await DLMM.create(connection, SOL_USDC_POOL);
+    const positionPubKey = new PublicKey(positionId);
+
+    // Get position details
+    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(
+      positionPubKey
+    );
+    const userPosition = userPositions.find(({ publicKey }) =>
+      publicKey.equals(positionPubKey)
+    );
+
+    if (!userPosition) {
+      throw new Error("Position not found");
+    }
+
+    // Calculate withdrawal amounts
+    const binIdsToRemove = userPosition.positionData.positionBinData.map(
+      (bin) => bin.binId
+    );
+
+    // Handle partial or full withdrawal
+    const bpsToRemove = amount
+      ? Math.min(amount * 100, 10000) // Convert amount to basis points (max 100%)
+      : 10000; // 100% for full withdrawal
+
+    const bps = new BN(bpsToRemove);
+
+    // Execute withdrawal transaction
+    const removeLiquidityTx = await dlmmPool.removeLiquidity({
+      position: userPosition.publicKey,
+      user: positionPubKey,
+      binIds: binIdsToRemove,
+      bps,
+      shouldClaimAndClose: !amount, // Only close if full withdrawal
+    });
+
+    // Track withdrawn amounts
+    let totalWithdrawnSOL = 0;
+    let totalWithdrawnUSDC = 0;
+
+    // Process transaction(s)
+    const txResults = [];
+    for (let tx of Array.isArray(removeLiquidityTx)
+      ? removeLiquidityTx
+      : [removeLiquidityTx]) {
+      const txHash = await sendAndConfirmTransaction(connection, tx, [], {
+        skipPreflight: false,
+        preflightCommitment: "singleGossip",
+      });
+      txResults.push(txHash);
+    }
+
+    // Get final position state
+    const finalPosition = amount
+      ? await dlmmPool.getPositionsByUserAndLbPair(positionPubKey)
+      : null;
+
+    return {
+      success: true,
+      transactionHashes: txResults,
+      withdrawnAmounts: {
+        sol: totalWithdrawnSOL,
+        usdc: totalWithdrawnUSDC,
+      },
+      remainingPosition: finalPosition,
+      fullyClosed: !amount,
+    };
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Withdrawal failed: ${error.message}`);
+    }
+    throw new Error("Withdrawal failed: Unknown error");
   }
 }
