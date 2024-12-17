@@ -7,7 +7,8 @@ import {
   sendAndConfirmTransaction,
   Transaction,
 } from "@solana/web3.js";
-import { BN } from "bn.js";
+import BN from "bn.js";
+import * as web3 from "@solana/web3.js";
 
 const connection = new Connection(
   process.env.SOLANA_RPC_URL || clusterApiUrl("devnet"),
@@ -15,8 +16,17 @@ const connection = new Connection(
 );
 
 const SOL_USDC_POOL = new PublicKey(
-  "ARwi1S4DaiTG5DX7S4M4ZsrXqpMD1MrTmbu9ue2tpmEq"
+  "vC5B1ZegcGBasscPAjtvgwBLahrME4tvyntC9ovpCpx"
 );
+
+let cachedDlmmPool: DLMM | null = null;
+
+const getDlmmPool = async () => {
+  if (!cachedDlmmPool) {
+    cachedDlmmPool = await DLMM.create(connection, SOL_USDC_POOL);
+  }
+  return cachedDlmmPool;
+};
 
 export async function createLiquidityPosition(
   tokenMint: string,
@@ -42,7 +52,7 @@ export async function createLiquidityPosition(
 
   try {
     console.log("Creating liquidity position...");
-    const dlmmPool = await DLMM.create(connection, SOL_USDC_POOL);
+    const dlmmPool = await getDlmmPool();
 
     // Validate user has sufficient SOL balance
     const balance = await connection.getBalance(new PublicKey(tokenMint));
@@ -59,16 +69,29 @@ export async function createLiquidityPosition(
       Number(activeBin.price)
     );
 
+    console.log("Active Bin Price Per Token:", activeBinPricePerToken);
+
     // Calculate bin IDs based on price range
     const minBinId = dlmmPool.getBinIdFromPrice(priceRange.lower, true);
     const maxBinId = dlmmPool.getBinIdFromPrice(priceRange.upper, true);
 
+    console.log("Min Bin ID:", minBinId);
+
+    console.log("requiredBalance", requiredBalance);
+
     // Setup position amounts
     const totalXAmount = new BN(requiredBalance);
-    const totalYAmount = totalXAmount.mul(new BN(activeBinPricePerToken));
+    const totalYAmount = totalXAmount.mul(
+      new BN(Math.round(Number(activeBinPricePerToken)))
+    );
+
+    console.log("Total X Amount:", totalXAmount.toString());
+    console.log("Total Y Amount:", totalYAmount.toString());
 
     // Generate unique position ID
-    const positionPubKey = PublicKey.unique();
+    const posKeypair = web3.Keypair.generate();
+    let positionPubKey = posKeypair.publicKey;
+    console.log("created key:", positionPubKey.toBase58());
 
     // Initialize position with one-sided strategy
     await dlmmPool.initializePositionAndAddLiquidityByStrategy({
@@ -93,16 +116,21 @@ export async function withdrawPosition(positionId: string, amount?: number) {
   try {
     console.log(`Withdrawing position ID: ${positionId}`);
 
-    const dlmmPool = await DLMM.create(connection, SOL_USDC_POOL);
+    const dlmmPool = await getDlmmPool();
+
     const positionPubKey = new PublicKey(positionId);
 
     // Get position details
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(
       positionPubKey
     );
+
+    console.log("userPositons => ", userPositions);
     const userPosition = userPositions.find(({ publicKey }) =>
       publicKey.equals(positionPubKey)
     );
+
+    console.log("userPosition => ", userPosition);
 
     if (!userPosition) {
       throw new Error("Position not found");
@@ -175,40 +203,52 @@ export async function swapTokensToSol(
 ) {
   const quoteApi = createJupiterApiClient();
 
-  // Get quote
-  const quoteResponse = await quoteApi.quoteGet({
-    inputMint: tokenMint,
-    outputMint: "So11111111111111111111111111111111111111112", // Native SOL
-    amount: amountToSwap,
-    slippageBps: slippageBps,
-    onlyDirectRoutes: false,
-  });
+  console.log("quoteApi -> ", quoteApi);
 
-  // Get swap transaction
-  const swapTransaction = await quoteApi.swapPost({
-    swapRequest: {
-      quoteResponse,
-      userPublicKey: tokenMint,
-    },
-  });
+  try {
+    // Get quote
+    const quoteResponse = await quoteApi.quoteGet({
+      inputMint: tokenMint,
+      outputMint: "So11111111111111111111111111111111111111112", // Native SOL
+      amount: amountToSwap,
+      slippageBps: slippageBps,
+      onlyDirectRoutes: false,
+    });
 
-  // Execute the swap
-  const signature = await sendAndConfirmTransaction(
-    connection,
-    Transaction.from(Buffer.from(swapTransaction.swapTransaction, "base64")),
-    [],
-    { skipPreflight: false }
-  );
+    console.log({ quoteResponse: quoteResponse });
 
-  return {
-    success: true,
-    inputAmount: amountToSwap,
-    outputAmount: quoteResponse.outAmount,
-    route: {
-      marketInfos: quoteResponse.routePlan,
-      priceImpactPct: quoteResponse.priceImpactPct,
-    },
-    fees: quoteResponse.otherAmountThreshold,
-    txHash: signature,
-  };
+    // Get swap transaction
+    const swapTransaction = await quoteApi.swapPost({
+      swapRequest: {
+        quoteResponse,
+        userPublicKey: tokenMint,
+      },
+    });
+
+    // Execute the swap
+    const signature = await sendAndConfirmTransaction(
+      connection,
+      Transaction.from(Buffer.from(swapTransaction.swapTransaction, "base64")),
+      [],
+      { skipPreflight: false }
+    );
+
+    return {
+      success: true,
+      inputAmount: amountToSwap,
+      outputAmount: quoteResponse.outAmount,
+      route: {
+        marketInfos: quoteResponse.routePlan,
+        priceImpactPct: quoteResponse.priceImpactPct,
+      },
+      fees: quoteResponse.otherAmountThreshold,
+      txHash: signature,
+    };
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Failed to get quote: ${error.message}`);
+    } else {
+      throw new Error("Failed to get quote: Unknown error");
+    }
+  }
 }
