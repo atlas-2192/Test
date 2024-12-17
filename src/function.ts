@@ -1,9 +1,11 @@
 import DLMM, { StrategyType } from "@meteora-ag/dlmm";
+import { createJupiterApiClient } from "@jup-ag/api";
 import {
   clusterApiUrl,
   Connection,
   PublicKey,
   sendAndConfirmTransaction,
+  Transaction,
 } from "@solana/web3.js";
 import { BN } from "bn.js";
 
@@ -164,4 +166,49 @@ export async function withdrawPosition(positionId: string, amount?: number) {
     }
     throw new Error("Withdrawal failed: Unknown error");
   }
+}
+
+export async function swapTokensToSol(
+  tokenMint: string,
+  amountToSwap: number,
+  slippageBps: number = 100 // Default 1% slippage
+) {
+  const quoteApi = createJupiterApiClient();
+
+  // Get quote
+  const quoteResponse = await quoteApi.quoteGet({
+    inputMint: tokenMint,
+    outputMint: "So11111111111111111111111111111111111111112", // Native SOL
+    amount: amountToSwap,
+    slippageBps: slippageBps,
+    onlyDirectRoutes: false,
+  });
+
+  // Get swap transaction
+  const swapTransaction = await quoteApi.swapPost({
+    swapRequest: {
+      quoteResponse,
+      userPublicKey: tokenMint,
+    },
+  });
+
+  // Execute the swap
+  const signature = await sendAndConfirmTransaction(
+    connection,
+    Transaction.from(Buffer.from(swapTransaction.swapTransaction, "base64")),
+    [],
+    { skipPreflight: false }
+  );
+
+  return {
+    success: true,
+    inputAmount: amountToSwap,
+    outputAmount: quoteResponse.outAmount,
+    route: {
+      marketInfos: quoteResponse.routePlan,
+      priceImpactPct: quoteResponse.priceImpactPct,
+    },
+    fees: quoteResponse.otherAmountThreshold,
+    txHash: signature,
+  };
 }
