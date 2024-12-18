@@ -1,3 +1,7 @@
+import BN from "bn.js";
+import * as web3 from "@solana/web3.js";
+import bs58 from "bs58";
+import "dotenv/config";
 import DLMM, { StrategyType } from "@meteora-ag/dlmm";
 import { createJupiterApiClient } from "@jup-ag/api";
 import {
@@ -7,8 +11,6 @@ import {
   sendAndConfirmTransaction,
   Transaction,
 } from "@solana/web3.js";
-import BN from "bn.js";
-import * as web3 from "@solana/web3.js";
 
 const connection = new Connection(
   process.env.SOLANA_RPC_URL || clusterApiUrl("devnet"),
@@ -26,6 +28,34 @@ const getDlmmPool = async () => {
     cachedDlmmPool = await DLMM.create(connection, SOL_USDC_POOL);
   }
   return cachedDlmmPool;
+};
+
+const airDropSol = async (
+  connection: Connection,
+  publicKey: PublicKey,
+  amount = 1 * web3.LAMPORTS_PER_SOL
+) => {
+  try {
+    const airdropSignature = await connection.requestAirdrop(publicKey, amount);
+    const latestBlockHash = await connection.getLatestBlockhash();
+    await connection.confirmTransaction({
+      blockhash: latestBlockHash.blockhash,
+      lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
+      signature: airdropSignature,
+    });
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+};
+
+const getUser = async () => {
+  // Initialize user keypair with token mint
+  const privateKey = process.env.PRIVATE_KEY;
+  if (!privateKey) {
+    throw new Error("Private key is not defined in environment variables");
+  }
+  return web3.Keypair.fromSecretKey(bs58.decode(privateKey));
 };
 
 export async function createLiquidityPosition(
@@ -58,6 +88,8 @@ export async function createLiquidityPosition(
     const balance = await connection.getBalance(new PublicKey(tokenMint));
     const requiredBalance = solAmount * 1e9;
 
+    console.log("balance => ", balance);
+
     if (balance < requiredBalance) {
       throw new Error(
         `Insufficient SOL balance. Required: ${requiredBalance}, Available: ${balance}`
@@ -75,14 +107,12 @@ export async function createLiquidityPosition(
     const minBinId = dlmmPool.getBinIdFromPrice(priceRange.lower, true);
     const maxBinId = dlmmPool.getBinIdFromPrice(priceRange.upper, true);
 
-    console.log("Min Bin ID:", minBinId);
-
     console.log("requiredBalance", requiredBalance);
 
     // Setup position amounts
     const totalXAmount = new BN(requiredBalance);
-    const totalYAmount = totalXAmount.mul(
-      new BN(Math.round(Number(activeBinPricePerToken)))
+    const totalYAmount = new BN(
+      Math.floor(requiredBalance * Number(activeBinPricePerToken))
     );
 
     console.log("Total X Amount:", totalXAmount.toString());
@@ -90,21 +120,47 @@ export async function createLiquidityPosition(
 
     // Generate unique position ID
     const posKeypair = web3.Keypair.generate();
-    let positionPubKey = posKeypair.publicKey;
-    console.log("created key:", positionPubKey.toBase58());
+    const positionPubKey = posKeypair.publicKey;
+
+    const userKeypair = await getUser();
 
     // Initialize position with one-sided strategy
-    await dlmmPool.initializePositionAndAddLiquidityByStrategy({
-      totalXAmount,
-      totalYAmount,
-      strategy: {
-        maxBinId,
-        minBinId,
-        strategyType: StrategyType.BidAskOneSide,
-      },
-      user: new PublicKey(tokenMint),
-      positionPubKey,
-    });
+    const createPositionTx =
+      await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+        totalXAmount,
+        totalYAmount,
+        strategy: {
+          maxBinId,
+          minBinId,
+          strategyType: StrategyType.BidAskOneSide,
+        },
+        user: userKeypair.publicKey,
+        positionPubKey,
+      });
+
+    try {
+      // Convert to versioned transaction
+      const versionedTx = new web3.VersionedTransaction(
+        createPositionTx.compileMessage()
+      );
+      versionedTx.sign([userKeypair, posKeypair]);
+
+      // Send the versioned transaction
+      const txSignature = await connection.sendTransaction(versionedTx, {
+        skipPreflight: true,
+        maxRetries: 3,
+      });
+
+      try {
+        const result = await connection.confirmTransaction(txSignature);
+
+        console.log("result => ", result);
+      } catch (error) {
+        throw new Error(`Transaction failed: ${error}`);
+      }
+    } catch (error) {
+      throw new Error(`Error creating position => ${error}`);
+    }
 
     return positionPubKey;
   } catch (error) {
@@ -116,16 +172,19 @@ export async function withdrawPosition(positionId: string, amount?: number) {
   try {
     console.log(`Withdrawing position ID: ${positionId}`);
 
+    const userKeypair = await getUser();
+
     const dlmmPool = await getDlmmPool();
 
     const positionPubKey = new PublicKey(positionId);
 
     // Get position details
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(
-      positionPubKey
+      userKeypair.publicKey
     );
 
     console.log("userPositons => ", userPositions);
+
     const userPosition = userPositions.find(({ publicKey }) =>
       publicKey.equals(positionPubKey)
     );

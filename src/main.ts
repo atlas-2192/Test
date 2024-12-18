@@ -1,5 +1,4 @@
 import inquirer from "inquirer";
-import chalk from "chalk"; // Add color support
 import {
   createLiquidityPosition,
   withdrawPosition,
@@ -7,7 +6,6 @@ import {
 } from "./functions";
 
 async function main() {
-  // Enable raw mode for better terminal handling
   process.stdin.setRawMode?.(true);
   process.stdin.resume();
 
@@ -30,25 +28,87 @@ async function main() {
     switch (action) {
       case "Create Liquidity Position":
         const { tokenMint, solAmount, lower, upper } = await inquirer.prompt([
-          { type: "input", name: "tokenMint", message: "Token Mint Address:" },
           {
-            type: "number",
+            type: "input",
+            name: "tokenMint",
+            message: "Token Mint Address:",
+            validate: (input) => {
+              if (!input || input.trim() === "") {
+                return "Token mint address cannot be empty";
+              }
+              return true;
+            },
+          },
+          {
+            type: "input",
             name: "solAmount",
             message: "SOL Amount for Liquidity:",
+            validate: (input: string) => {
+              if (!input.match(/^\d*\.?\d+$/)) {
+                return "Please enter a valid decimal number";
+              }
+              const value = parseFloat(input);
+              if (value <= 0) {
+                return "Amount must be greater than 0";
+              }
+              return true;
+            },
+            filter: (input: string) => {
+              const parsed = parseFloat(input);
+              return isNaN(parsed) ? input : parsed;
+            },
           },
-          { type: "number", name: "lower", message: "Lower Price Bound:" },
-          { type: "number", name: "upper", message: "Upper Price Bound:" },
+          {
+            type: "input",
+            name: "lower",
+            message: "Lower Price Bound:",
+            validate: (input: string) => {
+              if (!input.match(/^\d*\.?\d+$/)) {
+                return "Please enter a valid decimal number";
+              }
+              return true;
+            },
+            filter: (input: string) => {
+              const parsed = parseFloat(input);
+              return isNaN(parsed) ? input : parsed;
+            },
+          },
+          {
+            type: "input",
+            name: "upper",
+            message: "Upper Price Bound:",
+            validate: (input: string) => {
+              if (!input.match(/^\d*\.?\d+$/)) {
+                return "Please enter a valid decimal number";
+              }
+              return true;
+            },
+            filter: (input: string) => {
+              const parsed = parseFloat(input);
+              return isNaN(parsed) ? input : parsed;
+            },
+          },
         ]);
         const position = await createLiquidityPosition(tokenMint, solAmount, {
           lower,
           upper,
         });
-        console.log("position: ", position?.toBase58());
+        console.log("Position created: ", position?.toBase58());
         break;
 
       case "Withdraw Position":
         const { positionId } = await inquirer.prompt([
-          { type: "input", name: "positionId", message: "Position ID:" },
+          {
+            type: "input",
+            name: "positionId",
+            message: "Position ID:",
+            validate: (input) => {
+              if (!input || input.trim() === "") {
+                return "Position ID cannot be empty";
+              }
+              return true;
+            },
+          },
         ]);
         await withdrawPosition(positionId);
         break;
@@ -59,8 +119,32 @@ async function main() {
             type: "input",
             name: "swapTokenMint",
             message: "Token Mint Address:",
+            validate: (input) => {
+              if (!input || input.trim() === "") {
+                return "Token mint address cannot be empty";
+              }
+              return true;
+            },
           },
-          { type: "number", name: "swapAmount", message: "Amount to Swap:" },
+          {
+            type: "input",
+            name: "swapAmount",
+            message: "Amount to Swap:",
+            validate: (input: string) => {
+              if (!input.match(/^\d*\.?\d+$/)) {
+                return "Please enter a valid decimal number";
+              }
+              const value = parseFloat(input);
+              if (value <= 0) {
+                return "Amount must be greater than 0";
+              }
+              return true;
+            },
+            filter: (input: string) => {
+              const parsed = parseFloat(input);
+              return isNaN(parsed) ? input : parsed;
+            },
+          },
         ]);
         await swapTokensToSol(swapTokenMint, swapAmount);
         break;
@@ -75,7 +159,8 @@ async function main() {
       console.error("Operation failed:", String(error));
     }
   }
-} // Handle clean exit
+}
+
 process.on("exit", () => {
   process.stdin.setRawMode?.(false);
 });
